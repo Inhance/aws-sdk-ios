@@ -144,6 +144,91 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
     return [self upload:uploadRequest cacheKey:cacheKey];
 }
 
+
+//step 1 for Starting Multipart Upload
+- (AWSTask *)upload_FireAndForget:(AWSS3TransferManagerUploadRequest *)uploadRequest {
+    NSString *cacheKey = nil;
+    if ([uploadRequest valueForKey:@"cacheIdentifier"]) {
+        cacheKey = [uploadRequest valueForKey:@"cacheIdentifier"];
+    } else {
+        cacheKey = [[NSProcessInfo processInfo] globallyUniqueString];
+        [uploadRequest setValue:cacheKey forKey:@"cacheIdentifier"];
+    }
+    return [AWSTask taskWithResult: [self upload__FireAndForget:uploadRequest cacheKey:cacheKey]];
+}
+
+
+//step 2 for starting Multipart Upload
+- (AWSTask *)upload__FireAndForget:(AWSS3TransferManagerUploadRequest *)uploadRequest
+           cacheKey:(NSString *)cacheKey {
+    //validate input
+    if ([uploadRequest.bucket length] == 0) {
+        NSDictionary *userInfo = @{NSLocalizedDescriptionKey: NSLocalizedString(@"'bucket' name can not be empty", nil)};
+        return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorMissingRequiredParameters userInfo:userInfo]];
+    }
+    if ([uploadRequest.key length] == 0) {
+        NSDictionary *userInfo = @{NSLocalizedDescriptionKey: NSLocalizedString(@"'key' name can not be empty", nil)};
+        return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorMissingRequiredParameters userInfo:userInfo]];
+    }
+    
+    //Check if the task has already completed
+    if (uploadRequest.state == AWSS3TransferManagerRequestStateCompleted) {
+        NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"can not continue to upload a completed task", nil)]};
+        return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorCompleted userInfo:userInfo]];
+    } else if (uploadRequest.state == AWSS3TransferManagerRequestStateCanceling){
+        NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"can not continue to upload a cancelled task.", nil)]};
+        return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorCancelled userInfo:userInfo]];
+    } else {
+        //change state to running
+        [uploadRequest setValue:[NSNumber numberWithInteger:AWSS3TransferManagerRequestStateRunning] forKey:@"state"];
+    }
+
+    __weak AWSS3TransferManager *weakSelf = self;
+    [weakSelf.cache setObject:uploadRequest    forKey:cacheKey];
+    AWSTask *initRequest = nil;
+
+    //if it is a new request, Init multipart upload request
+    if (uploadRequest.currentUploadingPartNumber == 0)
+    {
+        AWSS3CreateMultipartUploadRequest *createMultipartUploadRequest = [AWSS3CreateMultipartUploadRequest new];
+        [createMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+        [createMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
+        initRequest = [weakSelf.s3 createMultipartUpload:createMultipartUploadRequest];
+        [uploadRequest setValue:[NSMutableArray arrayWithCapacity:0] forKey:@"completedPartsArray"];
+    }
+    else
+    {
+        //if it is a paused request, skip initMultipart Upload request.
+        initRequest = [AWSTask taskWithResult:nil];
+    }
+    
+    AWSS3CompleteMultipartUploadRequest *completeMultipartUploadRequest = [AWSS3CompleteMultipartUploadRequest new];
+    [completeMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+    [completeMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"];
+    
+    return [initRequest continueWithBlock_FireAndForget:^id(AWSTask *task)
+    {
+        if ( task )
+        {
+            AWSS3CreateMultipartUploadOutput *output = task.result;
+            if (output.uploadId)
+            {
+                NSLog(@"\nDONiS CODE AAWSS3TransferManager multipartUpload_FireAndForget UploadId=%@ bucket=%@ key=%@", output.uploadId, output.bucket, output.key);
+                [[task.result aws_properties] setValue:output.uploadId forKey:@"UploadId"];
+                
+                //CALL DONIs CODE
+                
+                //END DONIs CODE
+                
+                completeMultipartUploadRequest.uploadId = output.uploadId;
+                uploadRequest.uploadId = output.uploadId;
+            }
+        }
+        return  task;
+    }];
+}
+
+
 - (AWSTask *)upload:(AWSS3TransferManagerUploadRequest *)uploadRequest
           cacheKey:(NSString *)cacheKey {
     //validate input
@@ -183,7 +268,7 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
         return [AWSTask taskWithError:error];
     }
 
-    unsigned long long fileSize = [attributes fileSize];
+    unsigned long long fileSize =        [attributes fileSize];
     __weak AWSS3TransferManager *weakSelf = self;
 
     AWSTask *task = [AWSTask taskWithResult:nil];
@@ -191,10 +276,16 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
         [weakSelf.cache setObject:uploadRequest
                            forKey:cacheKey];
         return nil;
-    }] continueWithSuccessBlock:^id(AWSTask *task) {
-        if (fileSize > AWSS3TransferManagerMinimumPartSize) {
+    }] continueWithSuccessBlock:^id(AWSTask *task)
+    {
+        return [weakSelf multipartUpload:uploadRequest fileSize:fileSize cacheKey:cacheKey];
+        
+        if (fileSize > AWSS3TransferManagerMinimumPartSize)
+        {
             return [weakSelf multipartUpload:uploadRequest fileSize:fileSize cacheKey:cacheKey];
-        } else {
+        }
+        else
+        {
             return [weakSelf putObject:uploadRequest fileSize:fileSize cacheKey:cacheKey];
         }
     }] continueWithBlock:^id(AWSTask *task) {
@@ -252,6 +343,248 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
 
     return uploadTask;
 }
+
+
+//copied and editied by wlynn
+- (AWSTask *)startMultipartUpload:(AWSS3TransferManagerUploadRequest *)uploadRequest
+                         fileSize:(unsigned long long) fileSize
+                         cacheKey:(NSString *)cacheKey
+                             data: (NSData*) data
+                             part: (int) part
+                           ofPart: (int) partCount{
+    
+        
+    AWSTask *initRequest = nil;
+    __weak AWSS3TransferManager *weakSelf = self;
+    
+    //if it is a new request, Init multipart upload request
+  
+    if (uploadRequest.currentUploadingPartNumber == 0) {
+        AWSS3CreateMultipartUploadRequest *createMultipartUploadRequest = [AWSS3CreateMultipartUploadRequest new];
+        [createMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+        [createMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
+        initRequest = [weakSelf.s3 createMultipartUpload:createMultipartUploadRequest];
+        [uploadRequest setValue:[NSMutableArray arrayWithCapacity:partCount] forKey:@"completedPartsArray"];
+    } else {
+        //if it is a paused request, skip initMultipart Upload request.
+        initRequest = [AWSTask taskWithResult:nil];
+    }
+    
+    AWSS3CompleteMultipartUploadRequest *completeMultipartUploadRequest = [AWSS3CompleteMultipartUploadRequest new];
+    [completeMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+    [completeMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
+    
+    AWSTask *uploadTask = [[[initRequest continueWithSuccessBlock:^id(AWSTask *task) {
+        AWSS3CreateMultipartUploadOutput *output = task.result;
+        
+        if (output.uploadId) {
+            completeMultipartUploadRequest.uploadId = output.uploadId;
+            uploadRequest.uploadId = output.uploadId; //pass uploadId to the request for reference.
+        } else {
+            completeMultipartUploadRequest.uploadId = uploadRequest.uploadId;
+        }
+        
+        AWSTask *uploadPartsTask = [AWSTask taskWithResult:nil];
+        NSUInteger c = uploadRequest.currentUploadingPartNumber;
+        if (c == 0) {
+            c = 1;
+        }
+        
+        __block int64_t multiplePartsTotalBytesSent = 0;
+        
+        for (NSUInteger i = c; i < partCount + 1; i++) {
+            uploadPartsTask = [uploadPartsTask continueWithSuccessBlock:^id(AWSTask *task) {
+                
+                //Cancel this task if state is canceling
+                if (uploadRequest.state == AWSS3TransferManagerRequestStateCanceling) {
+                    //return a error task
+                    NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"S3 MultipartUpload has been cancelled.", nil)]};
+                    return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorCancelled userInfo:userInfo]];
+                }
+                //Pause this task if state is Paused
+                if (uploadRequest.state == AWSS3TransferManagerRequestStatePaused) {
+                    
+                    //return an error task
+                    NSDictionary *userInfo = @{NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"S3 MultipartUpload has been paused.", nil)]};
+                    return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain code:AWSS3TransferManagerErrorPaused userInfo:userInfo]];
+                }
+                
+                NSUInteger dataLength = i == partCount ? (NSUInteger)fileSize - ((i - 1) * AWSS3TransferManagerMinimumPartSize) : AWSS3TransferManagerMinimumPartSize;
+                
+                NSFileHandle *fileHandle = [NSFileHandle fileHandleForReadingAtPath:[uploadRequest.body path]];
+                [fileHandle seekToFileOffset:(i - 1) * AWSS3TransferManagerMinimumPartSize];
+                NSData *partData = [fileHandle readDataOfLength:dataLength];
+                NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
+                [partData writeToURL:tempURL atomically:YES];
+                partData = nil;
+                [fileHandle closeFile];
+                
+                AWSS3UploadPartRequest *uploadPartRequest = [AWSS3UploadPartRequest new];
+                uploadPartRequest.bucket = uploadRequest.bucket;
+                uploadPartRequest.key = uploadRequest.key;
+                uploadPartRequest.partNumber = @(i);
+                uploadPartRequest.body = tempURL;
+                uploadPartRequest.contentLength = @(dataLength);
+                uploadPartRequest.uploadId = output.uploadId?output.uploadId:uploadRequest.uploadId;
+                
+                //pass SSE Value
+                uploadPartRequest.SSECustomerAlgorithm = uploadRequest.SSECustomerAlgorithm;
+                uploadPartRequest.SSECustomerKey = uploadRequest.SSECustomerKey;
+                uploadPartRequest.SSECustomerKeyMD5 = uploadRequest.SSECustomerKeyMD5;
+                
+                uploadRequest.currentUploadingPart = uploadPartRequest; //retain the current uploading parts for cancel/pause purpose
+                
+                //reprocess the progressFeed received from s3 client
+                uploadPartRequest.uploadProgress = ^(int64_t bytesSent, int64_t totalBytesSent, int64_t totalBytesExpectedToSend) {
+                    
+                    AWSNetworkingRequest *internalRequest = [uploadRequest valueForKey:@"internalRequest"];
+                    if (internalRequest.uploadProgress) {
+                        int64_t previousSentDataLengh = [[uploadRequest valueForKey:@"totalSuccessfullySentPartsDataLength"] longLongValue];
+                        if (multiplePartsTotalBytesSent == 0) {
+                            multiplePartsTotalBytesSent += bytesSent;
+                            multiplePartsTotalBytesSent += previousSentDataLengh;
+                            internalRequest.uploadProgress(bytesSent,multiplePartsTotalBytesSent,fileSize);
+                        } else {
+                            multiplePartsTotalBytesSent += bytesSent;
+                            internalRequest.uploadProgress(bytesSent,multiplePartsTotalBytesSent,fileSize);
+                        }
+                    }
+                };
+                
+                return [[[weakSelf.s3 uploadPart:uploadPartRequest] continueWithSuccessBlock:^id(AWSTask *task) {
+                    AWSS3UploadPartOutput *partOuput = task.result;
+                    
+                    AWSS3CompletedPart *completedPart = [AWSS3CompletedPart new];
+                    completedPart.partNumber = @(i);
+                    completedPart.ETag = partOuput.ETag;
+                    
+                    NSMutableArray *completedParts = [uploadRequest valueForKey:@"completedPartsArray"];
+                    
+                    if (![completedParts containsObject:completedPart]) {
+                        [completedParts addObject:completedPart];
+                    }
+                    
+                    int64_t totalSentLenght = [[uploadRequest valueForKey:@"totalSuccessfullySentPartsDataLength"] longLongValue];
+                    totalSentLenght += dataLength;
+                    
+                    [uploadRequest setValue:@(totalSentLenght) forKey:@"totalSuccessfullySentPartsDataLength"];
+                    
+                    //set currentUploadingPartNumber to i+1 to prevent it be downloaded again if pause happened right after parts finished.
+                    uploadRequest.currentUploadingPartNumber = i + 1;
+                    [weakSelf.cache setObject:uploadRequest forKey:cacheKey];
+                    
+                    return nil;
+                }] continueWithBlock:^id(AWSTask *task) {
+                    NSError *error = nil;
+                    [[NSFileManager defaultManager] removeItemAtURL:tempURL
+                                                              error:&error];
+                    if (error) {
+                        AWSLogError(@"Failed to delete a temporary file for part upload: [%@]", error);
+                    }
+                    
+                    if (task.error) {
+                        return [AWSTask taskWithError:task.error];
+                    } else {
+                        return nil;
+                    }
+                }];
+            }];
+        }
+        
+        return uploadPartsTask;
+    }] continueWithSuccessBlock:^id(AWSTask *task)
+    {
+        
+        //If all parts upload succeed, send completeMultipartUpload request
+        NSMutableArray *completedParts = [uploadRequest valueForKey:@"completedPartsArray"];
+        if ([completedParts count] != partCount)
+        {
+            NSDictionary *userInfo = @{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"completedParts count is not equal to totalPartCount. expect %lu but got %lu",(unsigned long)partCount,(unsigned long)[completedParts count]],@"completedParts":completedParts};
+            return [AWSTask taskWithError:[NSError errorWithDomain:AWSS3TransferManagerErrorDomain
+                                                              code:AWSS3TransferManagerErrorUnknown
+                                                          userInfo:userInfo]];
+        }
+        
+        AWSS3CompletedMultipartUpload *completedMultipartUpload = [AWSS3CompletedMultipartUpload new];
+        completedMultipartUpload.parts = completedParts;
+        completeMultipartUploadRequest.multipartUpload = completedMultipartUpload;
+        
+        return [weakSelf.s3 completeMultipartUpload:completeMultipartUploadRequest];
+    }] continueWithBlock:^id(AWSTask *task) {
+        
+        //delete cached Object if state is not Paused
+        if (uploadRequest.state != AWSS3TransferManagerRequestStatePaused) {
+            [weakSelf.cache removeObjectForKey:cacheKey];
+        }
+        
+        if (uploadRequest.state == AWSS3TransferManagerRequestStateCanceling) {
+            [weakSelf abortMultipartUploadsForRequest:uploadRequest];
+        }
+        
+        if (task.error) {
+            return [AWSTask taskWithError:task.error];
+        }
+        
+        AWSS3TransferManagerUploadOutput *uploadOutput = [AWSS3TransferManagerUploadOutput new];
+        if (task.result) {
+            AWSS3CompleteMultipartUploadOutput *completeMultipartUploadOutput = task.result;
+            [uploadOutput aws_copyPropertiesFromObject:completeMultipartUploadOutput];
+        }
+        
+        return uploadOutput;
+    }];
+    
+    return uploadTask;
+}
+
+
+
+- (AWSTask *)multipartUpload_FireAndForget:(AWSS3TransferManagerUploadRequest *)uploadRequest
+                    fileSize:(unsigned long long) fileSize
+                    cacheKey:(NSString *)cacheKey {
+    NSUInteger partCount = ceil((double)fileSize / AWSS3TransferManagerMinimumPartSize);
+    
+    AWSTask *initRequest = nil;
+    __weak AWSS3TransferManager *weakSelf = self;
+    
+    //if it is a new request, Init multipart upload request
+    if (uploadRequest.currentUploadingPartNumber == 0)
+    {
+        AWSS3CreateMultipartUploadRequest *createMultipartUploadRequest = [AWSS3CreateMultipartUploadRequest new];
+        [createMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+        [createMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
+        initRequest = [weakSelf.s3 createMultipartUpload:createMultipartUploadRequest];
+        [uploadRequest setValue:[NSMutableArray arrayWithCapacity:partCount] forKey:@"completedPartsArray"];
+    }
+    else
+    {
+        //if it is a paused request, skip initMultipart Upload request.
+        initRequest = [AWSTask taskWithResult:nil];
+    }
+    
+    AWSS3CompleteMultipartUploadRequest *completeMultipartUploadRequest = [AWSS3CompleteMultipartUploadRequest new];
+    [completeMultipartUploadRequest aws_copyPropertiesFromObject:uploadRequest];
+    [completeMultipartUploadRequest setValue:[AWSNetworkingRequest new] forKey:@"internalRequest"]; //recreate a new internalRequest
+
+    return [AWSTask taskWithResult:[initRequest continueWithBlock:^id(AWSTask *task)
+                                    {
+                                        if ( task )
+                                        {
+                                            AWSS3CreateMultipartUploadOutput *output = task.result;
+                                            if (output.uploadId)
+                                            {
+                                                NSLog(@"/nAWSS3TransferManager multipartUpload_FireAndForget A UploadId= %@", output.uploadId);
+                                                [[task.result aws_properties] setValue:output.uploadId forKey:@"UploadId"];
+                                                
+                                                completeMultipartUploadRequest.uploadId = output.uploadId;
+                                                uploadRequest.uploadId = output.uploadId; //pass uploadId to the request for reference.
+                                            }
+                                        }
+                                        return [AWSTask taskWithResult:task];
+                                    }]];
+}
+
+
 
 - (AWSTask *)multipartUpload:(AWSS3TransferManagerUploadRequest *)uploadRequest
                    fileSize:(unsigned long long) fileSize

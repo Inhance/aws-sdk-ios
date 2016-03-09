@@ -47,6 +47,8 @@ typedef void (^AWSS3TransferManagerResumeAllBlock) (AWSRequest *request);
  */
 @interface AWSS3TransferManager : AWSService
 
+
+
 /**
  Returns the singleton service client. If the singleton object does not exist, the SDK instantiates the default service client with `defaultServiceConfiguration` from `[AWSServiceManager defaultServiceManager]`. The reference to this object is maintained by the SDK, and you do not need to retain it manually.
 
@@ -188,6 +190,17 @@ typedef void (^AWSS3TransferManagerResumeAllBlock) (AWSRequest *request);
  */
 - (AWSTask *)upload:(AWSS3TransferManagerUploadRequest *)uploadRequest;
 
+
+- (AWSTask *)upload_FireAndForget:(AWSS3TransferManagerUploadRequest *)uploadRequest;
+
+
+- (AWSTask *)startMultipartUpload:(AWSS3TransferManagerUploadRequest *)uploadRequest
+                         fileSize:(unsigned long long) fileSize
+                         cacheKey:(NSString *)cacheKey
+                             data: (NSData*) data
+                             part: (int) part
+                           ofPart: (int) partCount;
+
 /**
  Schedules a new transfer to download data from Amazon S3 and save it to the specified file.
 
@@ -219,6 +232,10 @@ typedef void (^AWSS3TransferManagerResumeAllBlock) (AWSRequest *request);
  @return AWSTask.
  */
 - (AWSTask *)resumeAll:(AWSS3TransferManagerResumeAllBlock)block;
++ (AWSTask *)multipartUpload:(AWSS3TransferManagerUploadRequest *)uploadRequest
+                    fileSize:(unsigned long long) fileSize
+                    cacheKey:(NSString *)cacheKey;
+
 
 /**
  Clears the local cache.
