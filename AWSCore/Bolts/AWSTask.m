@@ -318,11 +318,12 @@ NSString *const AWSTaskMultipleExceptionsException = @"AWSMultipleExceptionsExce
     return [self continueWithExecutor:executor block:block cancellationToken:nil];
 }
 
-- (AWSTask *)continueWithExecutor:(AWSExecutor *)executor
-                           block:(AWSContinuationBlock)block
-               cancellationToken:(AWSCancellationToken *)cancellationToken {
-    AWSTaskCompletionSource *tcs = [AWSTaskCompletionSource taskCompletionSource];
 
+- (AWSTask *)continueWithExecutor:(AWSExecutor *)executor
+                            block:(AWSContinuationBlock)block
+                cancellationToken:(AWSCancellationToken *)cancellationToken {
+    AWSTaskCompletionSource *tcs = [AWSTaskCompletionSource taskCompletionSource];
+    
     // Capture all of the state that needs to used when the continuation is complete.
     void (^wrappedBlock)() = ^() {
         [executor execute:^{
@@ -330,7 +331,7 @@ NSString *const AWSTaskMultipleExceptionsException = @"AWSMultipleExceptionsExce
                 [tcs cancel];
                 return;
             }
-
+            
             id result = nil;
             @try {
                 result = block(self);
@@ -338,9 +339,9 @@ NSString *const AWSTaskMultipleExceptionsException = @"AWSMultipleExceptionsExce
                 tcs.exception = exception;
                 return;
             }
-
+            
             if ([result isKindOfClass:[AWSTask class]]) {
-
+                
                 id (^setupWithTask) (AWSTask *) = ^id(AWSTask *task) {
                     if (cancellationToken.cancellationRequested || task.cancelled) {
                         [tcs cancel];
@@ -353,21 +354,21 @@ NSString *const AWSTaskMultipleExceptionsException = @"AWSMultipleExceptionsExce
                     }
                     return nil;
                 };
-
+                
                 AWSTask *resultTask = (AWSTask *)result;
-
+                
                 if (resultTask.completed) {
                     setupWithTask(resultTask);
                 } else {
                     [resultTask continueWithBlock:setupWithTask];
                 }
-
+                
             } else {
                 tcs.result = result;
             }
         }];
     };
-
+    
     BOOL completed;
     @synchronized(self.lock) {
         completed = self.completed;
@@ -378,13 +379,55 @@ NSString *const AWSTaskMultipleExceptionsException = @"AWSMultipleExceptionsExce
     if (completed) {
         wrappedBlock();
     }
+    
+    return tcs.task;
+}
 
+
+- (AWSTask *)continueWithExecutor_FireAndForget:(AWSExecutor *)executor
+                           block:(AWSContinuationBlock)block
+               cancellationToken:(AWSCancellationToken *)cancellationToken {
+    AWSTaskCompletionSource *tcs = [AWSTaskCompletionSource taskCompletionSource];
+
+    // Capture all of the state that needs to used when the continuation is complete.
+    void (^wrappedBlock)() = ^()
+    {
+        [executor execute:^
+        {
+            if (cancellationToken.cancellationRequested) {
+                [tcs cancel];
+                return;
+            }
+                block(self);
+            return;
+        }];
+    };
+
+    BOOL completed;
+    @synchronized(self.lock)
+    {
+        completed = self.completed;
+        if (!completed)
+        {
+            [self.callbacks addObject:[wrappedBlock copy]];
+        }
+    }
+    if (completed)
+    {
+        wrappedBlock();
+    }
     return tcs.task;
 }
 
 - (AWSTask *)continueWithBlock:(AWSContinuationBlock)block {
     return [self continueWithExecutor:[AWSExecutor defaultExecutor] block:block cancellationToken:nil];
 }
+
+
+- (AWSTask *)continueWithBlock_FireAndForget:(AWSContinuationBlock)block {
+    return [self continueWithExecutor_FireAndForget:[AWSExecutor defaultExecutor] block:block cancellationToken:nil];
+}
+
 
 - (AWSTask *)continueWithBlock:(AWSContinuationBlock)block
             cancellationToken:(AWSCancellationToken *)cancellationToken {

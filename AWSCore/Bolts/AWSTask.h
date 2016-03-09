@@ -153,6 +153,7 @@ typedef __nullable id(^AWSContinuationBlock)(AWSTask<ResultType> *task);
  this method will not be completed until that task is completed.
  */
 - (AWSTask *)continueWithBlock:(AWSContinuationBlock)block;
+- (AWSTask *)continueWithBlock_FireAndForget:(AWSContinuationBlock)block;
 
 /*!
  Enqueues the given block to be run once this task is complete.
